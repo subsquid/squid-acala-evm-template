@@ -1,31 +1,30 @@
 import {lookupArchive} from "@subsquid/archive-registry"
-import * as ss58 from "@subsquid/ss58"
 import {BatchContext, BatchProcessorItem, SubstrateBatchProcessor} from "@subsquid/substrate-processor"
 import {Store, TypeormDatabase} from "@subsquid/typeorm-store"
 import {In} from "typeorm"
-import {Account, Transfer} from "./model"
-import {BalancesTransferEvent} from "./types/events"
+import * as erc20 from "./abi/erc20"
+import {Owner, Transfer} from "./model"
+
+
+const CONTRACT_ADDRESS = '0x0000000000000000000100000000000000000080' // KAR address
 
 
 const processor = new SubstrateBatchProcessor()
     .setDataSource({
-        // Lookup archive by the network name in the Subsquid registry
-        //archive: lookupArchive("kusama", {release: "FireSquid"})
-
-        // Use archive created by archive/docker-compose.yml
-        archive: lookupArchive('kusama', {release: 'FireSquid'} )
+        archive: lookupArchive('karura', { release: 'FireSquid' }),
+        chain: process.env.WSS_NODE_ENDPOINT
     })
-    .addEvent('Balances.Transfer', {
+    .addAcalaEvmExecuted('*', {
+        logs: [{
+            contract: CONTRACT_ADDRESS,
+            filter: [[
+                erc20.events.Transfer.topic
+            ]]
+        }],
         data: {
-            event: {
-                args: true,
-                extrinsic: {
-                    hash: true,
-                    fee: true
-                }
-            }
+            event: {args: true},
         }
-    } as const)
+    })
 
 
 type Item = BatchProcessorItem<typeof processor>
@@ -33,97 +32,89 @@ type Ctx = BatchContext<Store, Item>
 
 
 processor.run(new TypeormDatabase(), async ctx => {
-    let transfersData = getTransfers(ctx)
+    let txs = extractTransferRecords(ctx)
 
-    let accountIds = new Set<string>()
-    for (let t of transfersData) {
-        accountIds.add(t.from)
-        accountIds.add(t.to)
-    }
-
-    let accounts = await ctx.store.findBy(Account, {id: In([...accountIds])}).then(accounts => {
-        return new Map(accounts.map(a => [a.id, a]))
+    let ownerIds = new Set<string>()
+    txs.forEach(tx => {
+        if (tx.from) {
+            ownerIds.add(tx.from)
+        }
+        if (tx.to) {
+            ownerIds.add(tx.to)
+        }
     })
 
-    let transfers: Transfer[] = []
+    let owners = await ctx.store.findBy(Owner, {
+        id: In([...ownerIds])
+    }).then(owners => {
+        return new Map(owners.map(o => [o.id, o]))
+    })
 
-    for (let t of transfersData) {
-        let {id, blockNumber, timestamp, extrinsicHash, amount, fee} = t
+    let transfers = txs.map(tx => {
+        let transfer = new Transfer({
+            id: tx.id,
+            amount: tx.amount,
+            block: tx.block,
+            timestamp: tx.timestamp
+        })
 
-        let from = getAccount(accounts, t.from)
-        let to = getAccount(accounts, t.to)
+        if (tx.from) {
+            transfer.from = owners.get(tx.from)
+            if (transfer.from == null) {
+                transfer.from = new Owner({id: tx.from, balance: 0n})
+                owners.set(tx.from, transfer.from)
+            }
+            transfer.from.balance -= tx.amount
+        }
 
-        transfers.push(new Transfer({
-            id,
-            blockNumber,
-            timestamp,
-            extrinsicHash,
-            from,
-            to,
-            amount,
-            fee
-        }))
-    }
+        if (tx.to) {
+            transfer.to = owners.get(tx.to)
+            if (transfer.to == null) {
+                transfer.to = new Owner({id: tx.to, balance: 0n})
+                owners.set(tx.to, transfer.to)
+            }
+            transfer.to.balance += tx.amount
+        }
 
-    await ctx.store.save(Array.from(accounts.values()))
+        return transfer
+    })
+
+    await ctx.store.save([...owners.values()])
     await ctx.store.insert(transfers)
 })
 
 
-interface TransferEvent {
+interface TransferRecord {
     id: string
-    blockNumber: number
-    timestamp: Date
-    extrinsicHash?: string
-    from: string
-    to: string
+    from?: string
+    to?: string
     amount: bigint
-    fee?: bigint
+    block: number
+    timestamp: Date
 }
 
 
-function getTransfers(ctx: Ctx): TransferEvent[] {
-    let transfers: TransferEvent[] = []
+function extractTransferRecords(ctx: Ctx): TransferRecord[] {
+    let records: TransferRecord[] = []
     for (let block of ctx.blocks) {
+        let logIndex = 0
         for (let item of block.items) {
-            if (item.name == "Balances.Transfer") {
-                let e = new BalancesTransferEvent(ctx, item.event)
-                let rec: {from: Uint8Array, to: Uint8Array, amount: bigint}
-                if (e.isV1020) {
-                    let [from, to, amount] = e.asV1020
-                    rec = { from, to, amount}
-                } else if (e.isV1050) {
-                    let [from, to, amount] = e.asV1050
-                    rec = { from, to, amount}
-                } else if (e.isV9130) {
-                    rec = e.asV9130
-                } else {
-                    throw new Error('Unsupported spec')
+            if (item.name == 'EVM.Executed') {
+                for (let log of item.event.args.logs) {
+                    if (log.address == CONTRACT_ADDRESS) {
+                        let transfer = erc20.events.Transfer.decode(log)
+                        records.push({
+                            id: item.event.id + '-' + logIndex++,
+                            from: transfer.from,
+                            to: transfer.to,
+                            amount: transfer.value.toBigInt(),
+                            block: block.header.height,
+                            timestamp: new Date(block.header.timestamp)
+                        })
+                    }
                 }
-                
-                transfers.push({
-                    id: item.event.id,
-                    blockNumber: block.header.height,
-                    timestamp: new Date(block.header.timestamp),
-                    extrinsicHash: item.event.extrinsic?.hash,
-                    from: ss58.codec('kusama').encode(rec.from),
-                    to: ss58.codec('kusama').encode(rec.to),
-                    amount: rec.amount,
-                    fee: item.event.extrinsic?.fee || 0n
-                })
             }
         }
     }
-    return transfers
-}
-
-
-function getAccount(m: Map<string, Account>, id: string): Account {
-    let acc = m.get(id)
-    if (acc == null) {
-        acc = new Account()
-        acc.id = id
-        m.set(id, acc)
-    }
-    return acc
+    return records
 }
