@@ -101,7 +101,7 @@ function extractTransferRecords(ctx: Ctx): TransferRecord[] {
         for (let item of block.items) {
             if (item.name == 'EVM.Executed') {
                 for (let log of item.event.args.logs) {
-                    if (log.address == CONTRACT_ADDRESS) {
+                    if (log.address == CONTRACT_ADDRESS && log.topics[0] == erc20.events.Transfer.topic) {
                         let transfer = erc20.events.Transfer.decode(log)
                         records.push({
                             id: item.event.id + '-' + logIndex++,
