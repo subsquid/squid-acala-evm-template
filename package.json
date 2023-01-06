@@ -18,13 +18,13 @@
     "@subsquid/ss58": "0.1.2",
     "@subsquid/substrate-processor": "2.1.0",
     "@subsquid/typeorm-store": "0.1.5",
+    "@subsquid/typeorm-migration": "0.1.4",
     "dotenv": "^16.0.0",
     "ethers": "^5.6.4",
     "pg": "^8.7.3",
     "typeorm": "^0.3.6"
   },
   "devDependencies": {
-    "@subsquid/typeorm-migration": "0.1.4",
     "@subsquid/evm-typegen": "2.0.2",
     "@subsquid/substrate-metadata-explorer": "1.0.9",
     "@subsquid/substrate-typegen": "2.0.0",
