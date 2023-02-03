@@ -14,6 +14,7 @@ const processor = new SubstrateBatchProcessor()
         archive: lookupArchive('karura', { release: 'FireSquid' }),
         chain: process.env.WSS_NODE_ENDPOINT
     })
+    .setBlockRange({ from: 1_600_000 })
     .addAcalaEvmExecuted('*', {
         logs: [{
             contract: CONTRACT_ADDRESS,
@@ -99,8 +100,10 @@ function extractTransferRecords(ctx: Ctx): TransferRecord[] {
     for (let block of ctx.blocks) {
         let logIndex = 0
         for (let item of block.items) {
+            // only successfull events
             if (item.name == 'EVM.Executed') {
                 for (let log of item.event.args.logs) {
+                    // only index topics
                     if (log.address == CONTRACT_ADDRESS && log.topics[0] == erc20.events.Transfer.topic) {
                         let transfer = erc20.events.Transfer.decode(log)
                         records.push({
